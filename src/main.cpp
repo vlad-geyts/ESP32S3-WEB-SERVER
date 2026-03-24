@@ -4,8 +4,10 @@
                           // (NVS) of the ESP32 to store data.
                           // Preferences data is stored in NVS in sections
                           // called "namespace". There  are e set of key-value pars.
-                          // LIke variables, a key-value pair has a data type.
+                          // LIke variables, a key-value pair has a data type.                          
 #include <WiFi.h>
+#include <WebServer.h>    // Library for the HTTP server
+#include <string>         // C++ Standard String library
 #include <string_view>    // C++17 header for high-performance string handling
                           // Just to data members: a pointer and a length. 
                           // Does not created a copy in memory. Read-only.
@@ -35,37 +37,15 @@ Preferences prefs;          // Created name of the Preferences object. This obje
                             // name space and the key-value pairs it contains.
                                     
 SemaphoreHandle_t panicSemaphore;
+WebServer server(80);       // Create a server on port 80 (standard HTTP)
 
 // Prototypes
 void IRAM_ATTR handleButtonInterrupt();
 void panicTask(void* pvParameters);
 void heartbeatTask(void* pvParameters);
-void initWiFi(); // New function for Phase 5
-
-// When you use the Arduino framework on an ESP32, the system automatically 
-// creates a task called the "Arduino Loop Task."
-// Core Assignment: By default, this task is pinned to Core 1.
-// Execution:
-//   1. The task starts and calls  setup() function once.
-//   2. Then, it enters an infinite loop that calls your loop() function repeatedly.
-//   3. Because vTaskDelete(NULL) called at the end of setup(), we 
-//      effectively "killed" the Arduino Loop Task. This is why we don't care 
-//      about assigning loop() to a core—it literally ceases to exist before it ever starts
-// Since initWiFi() is called inside setup(), it "borrows" the context of the Arduino Loop Task.
-// Current Core: It is running on Core 1
-// Blocking:
-//    While initWiFi() is looping (while (status != WL_CONNECTED)), it is blocking Core 1 
-//    from doing anything else in that specific task. However, since we've created 
-//    heartbeatTask on Core 0, the LED keeps blinking perfectly while the WiFi connects. 
-//    This is the power of your dual-core setup!
-// Should we assign setup() and iniWiFi() to a core?
-//    For setup(), we don't need to. The system does it for yus. However, for a "Senior" 
-//    implementation, we usually care about where the WiFi Stack itself is running.
-//    The WiFi Stack: 
-//         On the ESP32, the internal WiFi and TCP/IP stack (LwIP) usually runs on Core 0.
-//         By putting your panicTask (critical real-time) on Core 1 and your heartbeatTask 
-//         on Core 0, we have made a smart choice. ou've isolated your time-critical interrupt 
-//         logic (Core 1) away from the heavy lifting of the WiFi/Network processing (Core 0).
+void serverTask(void* pvParameters);    // Task to handle incoming web requests
+void initWiFi();
+void handleRoot();                      // Function that serves the HTML page
 
 void setup() {
     delay(1000);
@@ -74,15 +54,20 @@ void setup() {
     // Initialise WiFi early in the boot sequence
     initWiFi();
 
+    // Setup Web Server Routes
+    server.on("/", handleRoot); // When someone visits http://[IP]/, call handleRoot
+    server.begin();
+    Serial.println("HTTP Server Started.");
+
     // Initialise NVS and read lifetime count
-    prefs.begin("system", RO_MODE);     // Open namespace "system" and make it available
+    // prefs.begin("system", RO_MODE);     // Open namespace "system" and make it available
                                         // in READ ONLY (RO) mode.
 
-      // 'auto' - C++17 type deduction (compiler knows this is a uint32_t)
-    auto totalPanics = prefs.getUInt("panic_count", 0);   // Retrive value of the "panic_count" 
+    // 'auto' - C++17 type deduction (compiler knows this is a uint32_t)
+    //auto totalPanics = prefs.getUInt("panic_count", 0);   // Retrive value of the "panic_count" 
                                                           // key, define to 0 if not found
-    Serial.printf("Bootup - Lifetime Panic Events: %u\n", totalPanics);
-    prefs.end(); // Close our preference namespace.
+    //Serial.printf("Bootup - Lifetime Panic Events: %u\n", totalPanics);
+    //prefs.end(); // Close our preference namespace.
 
     // Create binary semaphore
     panicSemaphore = xSemaphoreCreateBinary();
@@ -95,9 +80,16 @@ void setup() {
 
     attachInterrupt(digitalPinToInterrupt(Config::ButtonPin), handleButtonInterrupt, FALLING);
 
-    // FreeRTOS Task Creation
+    // --- Task Distribution ---
+    // Panic Task: Core 1 (High Priority)
     xTaskCreatePinnedToCore(panicTask, "Panic", 4096, NULL, 3, NULL, 1);
+
+    // Heartbeat: Core 0 (Low Priority)
     xTaskCreatePinnedToCore(heartbeatTask, "Heartbeat", 4096, NULL, 1, NULL, 0);
+
+    // Web Server: Core 0 (Medium Priority)
+    // Running network tasks on Core 0 is standard as the WiFi stack lives there.
+    xTaskCreatePinnedToCore(serverTask, "WebServer", 4096, NULL, 2, NULL, 0);
 
     // Terminate the initial Arduino setup task to free up memory
     vTaskDelete(NULL);
@@ -105,6 +97,31 @@ void setup() {
 
 // The Linker needs this function to exist, even if it is never called.
 void loop() {}
+
+// --- C++17 Logic: HTML Generation ---
+void handleRoot() {
+    prefs.begin("system", true);
+    auto count = prefs.getUInt("panic_count", 0);
+    prefs.end();
+
+    // std::string (C++17) makes building HTML much cleaner than char arrays
+    std::string html = "<html><head><meta http-equiv='refresh' content='2'></head>";
+    html += "<body style='font-family: sans-serif; text-align: center;'>";
+    html += "<h1>ESP32-S3 Logic Monitor</h1>";
+    html += "<div style='font-size: 2em; color: red;'>Panic Count: " + std::to_string(count) + "</div>";
+    html += "<p>WiFi Signal: " + std::to_string(WiFi.RSSI()) + " dBm</p>";
+    html += "</body></html>";
+
+    server.send(200, "text/html", html.c_str());
+}
+
+// --- Web Server Task ---
+void serverTask(void* pvParameters) {
+    for(;;) {
+        server.handleClient(); // Check for new clients
+        vTaskDelay(pdMS_TO_TICKS(5)); // Yield to keep Core 0 smooth
+    }
+}
 
 // --- WiFi Initialization ---
 void initWiFi() {
