@@ -25,8 +25,14 @@ namespace Config {
 
     // WiFi Credentials using std::string_view
     // This is C++17's way to point to a string without copying it into memory.
-    constexpr std::string_view Ssid     = "ASI Personal";
-    constexpr std::string_view Password = "Personal@AcceleratedSystems";
+
+    // ASI Network
+    //constexpr std::string_view Ssid     = "ASI Personal";
+    //constexpr std::string_view Password = "Personal@AcceleratedSystems";
+
+    // RPi Network
+    constexpr std::string_view Ssid     = "ESP32test-network";
+    constexpr std::string_view Password = "esp32test123";
 }
 
 // Global Objects
@@ -50,6 +56,30 @@ void handleRoot();                      // Function that serves the HTML page
 void setup() {
     delay(1000);
     Serial.begin(115200);
+    delay(5000);
+
+    Serial.println("\n--- Connected via CH343 UART (COM?) ---");
+    Serial.println(  "--- ESP32-S3 Dual Core Booting --------");
+    Serial.println("\n--- ESP Hardware Info------------------");
+    
+    // Display ESP Information
+    Serial.printf("Chip ID: %u\n", ESP.getChipModel()); // Get the 24-bit chip ID
+    Serial.printf("CPU Frequency: %u MHz\n", ESP.getCpuFreqMHz()); // Get CPU frequency
+    Serial.printf("SDK Version: %s\n", ESP.getSdkVersion()); // Get SDK version
+
+    // Get and print flash memory information
+    Serial.printf("Flash Chip Size: %u bytes\n", ESP.getFlashChipSize()); // Get total flash size
+   
+    // Get and print SRAM memory information
+    Serial.printf("Internal free Heap at setup: %d bytes\n", ESP.getFreeHeap());
+    if(psramFound()){
+        Serial.printf("Total PSRAM Size: %d bytes", ESP.getPsramSize());
+    } else {
+         Serial.print("No PSRAM found");
+    }
+    Serial.println("\n---------------------------------------");
+    Serial.print("\n");  
+
 
     // Initialise WiFi early in the boot sequence
     initWiFi();
@@ -60,14 +90,14 @@ void setup() {
     Serial.println("HTTP Server Started.");
 
     // Initialise NVS and read lifetime count
-    // prefs.begin("system", RO_MODE);     // Open namespace "system" and make it available
+    prefs.begin("system", RO_MODE);     // Open namespace "system" and make it available
                                         // in READ ONLY (RO) mode.
 
     // 'auto' - C++17 type deduction (compiler knows this is a uint32_t)
-    //auto totalPanics = prefs.getUInt("panic_count", 0);   // Retrive value of the "panic_count" 
+    auto totalPanics = prefs.getUInt("panic_count", 0);   // Retrive value of the "panic_count" 
                                                           // key, define to 0 if not found
-    //Serial.printf("Bootup - Lifetime Panic Events: %u\n", totalPanics);
-    //prefs.end(); // Close our preference namespace.
+    Serial.printf("Bootup - Lifetime Panic Events: %u\n", totalPanics);
+    prefs.end(); // Close our preference namespace.
 
     // Create binary semaphore
     panicSemaphore = xSemaphoreCreateBinary();
@@ -125,19 +155,76 @@ void serverTask(void* pvParameters) {
 
 // --- WiFi Initialization ---
 void initWiFi() {
-    Serial.print("Connecting to WiFi...");
+
+    // WiFi Status 
+    //Serial.print(" Initial WiFi status - ");
+    //Serial.println(WiFi.status());
+
+        // Scan WiFi network 
+    Serial.println("\n--- WiFi Network Info------------------");
+
+    // Set WiFi to station mode and disconnect from an AP 
+    // if it was previously connected
+    WiFi.mode(WIFI_STA);
+    //WiFi.disconnect();
+    delay(500);
+    //Serial.print(" WiFi status befor scanning - ");
+    //Serial.println(WiFi.status());
+
+    auto n = WiFi.scanNetworks();
+    Serial.println("   ... Starting WiFi Scan ...");
+    if (n ==0) {
+        Serial.println("No networks found");
+    } else {
+        Serial.print(n);
+        Serial.println(" - networks found");
+
+        for (int i = 0; i < n; ++i) {
+            // Print SSID and RSSI for each network found
+            Serial.print(i + 1);
+            Serial.print(": ");
+            Serial.print(WiFi.SSID(i));
+            Serial.print(" (");
+            Serial.print(WiFi.RSSI(i));
+            Serial.print(")");
+            Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
+        delay(500);
+        }
+    }
+    Serial.print("\n"); 
+    Serial.print("    WiFi Scan Completed");
+    Serial.println("\n---------------------------------------");
+    Serial.print("\n"); 
+
+    Serial.println("Connecting to WiFi...");
     // .data() converts string_view back to the char* that WiFi.begin needs
     // .data() provides the raw pointer WiFi.begin() requires   
     WiFi.begin(Config::Ssid.data(), Config::Password.data());
 
     // Simple connection loop
+    // status = 0 (WL_IDLE_STATUS): temporary status assigned when WiF.begin() is called
+    // status = 1 (WL_NO_SSID_AVAIL): whem no SSID are available
+    // status = 2 (WL_SCAN_COMPLETED): scan networks is completed
+    // status = 3 (WL_CONNECTED): when connected to a WiFi network
+    // status = 4 (WL_CONNECT_FAILDE): when connection fails for all the attempts
+    // status = 5 (WL_CONNECTION_LOST): when the connection is lost
+    // status = 6 (WL_DISCONNECTED): when disconnected from a network
+
     while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+        delay(100);
+        Serial.print(WiFi.status());
     }
-    Serial.println("\nCONNECTED!");
+    Serial.print("\nCONNECTED!");
+    Serial.print("  RSSI: ");
+    Serial.println(WiFi.RSSI());  // WiFi connection strength
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
+
+    // Contimue monitoring WiFi status
+    ///for(;;){
+    //    delay(100);
+    //    Serial.print(WiFi.status());
+    //}
 }
 
 // --- Interrupt Service Routine ---
